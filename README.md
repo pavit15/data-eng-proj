@@ -87,3 +87,28 @@ kafka-console-consumer --bootstrap-server localhost:9092 --topic weather_stream
 kafka-console-consumer --bootstrap-server localhost:9092 --topic pitstop_stream
 ```
 10. Kafka and python producer done, now flink time.
+
+
+## Day 2
+
+1. So we have 3 producers, how to run them
+
+Check if docker services are running
+
+```
+docker ps
+```
+Activate venv only
+
+```
+venv\Scripts\activate
+```
+
+Run whichever script you need:
+
+```
+python telemetry_producer.py
+```
+2. Got stuck with re writing code for flink_job.py file, since some imports in the Dockerfile were missing. Had to make changes, rebuild, and re run
+
+
