@@ -88,7 +88,6 @@ kafka-console-consumer --bootstrap-server localhost:9092 --topic pitstop_stream
 ```
 10. Kafka and python producer done, now flink time.
 
-
 ## Day 2
 
 1. So we have 3 producers, how to run them
@@ -111,4 +110,66 @@ python telemetry_producer.py
 ```
 2. Got stuck with re writing code for flink_job.py file, since some imports in the Dockerfile were missing. Had to make changes, rebuild, and re run
 
+## Day 3
+
+Flink job running and working well with the 3 producers.
+
+
+## Day 4 
+
+Connect docker to postgreSQL
+
+```
+docker exec -it postgres psql -U admin -d telemetry
+```
+
+Create new table 
+```
+CREATE TABLE telemetry_processed (
+    id SERIAL PRIMARY KEY,
+    driver_id TEXT,
+    speed FLOAT,
+    temperature FLOAT,
+    rain_intensity FLOAT,
+    rolling_avg_speed FLOAT,
+    lap INT,
+    event_time BIGINT
+);
+```
+
+Check
+``` 
+\dt
+```
+
+Exit by 
+
+```
+\q
+```
+
+Submit flink job
+```
+docker exec -it jobmanager bash
+flink run -py /opt/flink/usrlib/flink_job.py
+```
+1 line
+```
+docker exec -it jobmanager flink run -py /opt/flink/usrlib/flink_job.py
+```
+
+Check on page
+```
+http://localhost:8081
+```
+Verify data in postgresql
+
+Connect again
+```
+docker exec -it postgres psql -U admin -d telemetry
+```
+Run query
+```
+SELECT * FROM telemetry_processed LIMIT 10;
+```
 
