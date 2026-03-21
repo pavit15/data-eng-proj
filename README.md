@@ -172,4 +172,5 @@ Run query
 ```
 SELECT * FROM telemetry_processed LIMIT 10;
 ```
-
+## Day 11
+Grafana + promethues integrated into final proj
