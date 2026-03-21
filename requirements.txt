@@ -3,3 +3,8 @@ kafka-python
 psycopg2-binary
 numpy
 protobuf
+streamlit
+scikit-learn
+joblib
+xgboost
+matplotlib

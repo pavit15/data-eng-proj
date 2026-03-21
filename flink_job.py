@@ -1,20 +1,30 @@
 import json
 import psycopg2
 import time
+import joblib
+import os
 
 from pyflink.datastream import StreamExecutionEnvironment
 from pyflink.common.serialization import SimpleStringSchema
-from pyflink.datastream.connectors.kafka import FlinkKafkaConsumer
-from pyflink.datastream.functions import MapFunction, CoMapFunction, ProcessWindowFunction
-from pyflink.datastream.window import TumblingProcessingTimeWindows
-from pyflink.common.time import Time
-
+from pyflink.datastream.connectors.kafka import FlinkKafkaConsumer, FlinkKafkaProducer
+from pyflink.datastream.functions import MapFunction, CoMapFunction
 
 # ---------------- ENV ----------------
 env = StreamExecutionEnvironment.get_execution_environment()
 env.enable_checkpointing(5000)
 env.set_parallelism(1)
 
+# ---------------- ML SETUP ----------------
+MODEL_DIR = "/tmp"
+ANOMALY_PATH = os.path.join(MODEL_DIR, "anomaly_model.pkl")
+TIRE_PATH = os.path.join(MODEL_DIR, "tire_model.pkl")
+
+if not os.path.exists(ANOMALY_PATH) or not os.path.exists(TIRE_PATH):
+    from ml_models import train_models
+    train_models()
+
+iso = joblib.load(ANOMALY_PATH)
+xgb = joblib.load(TIRE_PATH)
 
 # ---------------- KAFKA ----------------
 def create_consumer(topic):
@@ -23,150 +33,138 @@ def create_consumer(topic):
         "group.id": "flink_group_final",
         "auto.offset.reset": "latest"
     }
+    return FlinkKafkaConsumer(topic, SimpleStringSchema(), props)
 
-    return FlinkKafkaConsumer(
-        topics=topic,
-        deserialization_schema=SimpleStringSchema(),
-        properties=props
+def create_producer(topic):
+    return FlinkKafkaProducer(
+        topic=topic,
+        serialization_schema=SimpleStringSchema(),
+        producer_config={"bootstrap.servers": "kafka:29092"}
     )
 
+# ---------------- SAFE PARSE (DLQ READY) ----------------
+class SafeParse(MapFunction):
+    def map(self, x):
+        try:
+            data = json.loads(x)
 
-# ---------------- PARSE ----------------
-def parse(x):
-    try:
-        return json.loads(x)
-    except Exception as e:
-        print("Parse error:", e)
-        return None
+            # basic validation
+            if "driver_id" not in data or "speed" not in data:
+                return {"_error": True, "raw": x}
 
+            return data
+
+        except Exception:
+            return {"_error": True, "raw": x}
 
 # ---------------- STREAMS ----------------
-telemetry_stream = env.add_source(create_consumer("telemetry_stream")) \
-    .map(parse) \
-    .filter(lambda x: x is not None and "driver_id" in x)
+telemetry_raw = env.add_source(create_consumer("telemetry_stream"))
+weather_raw = env.add_source(create_consumer("weather_stream"))
 
-weather_stream = env.add_source(create_consumer("weather_stream")) \
-    .map(parse) \
-    .filter(lambda x: x is not None)
+telemetry_stream = telemetry_raw.map(SafeParse())
+weather_stream = weather_raw.map(SafeParse())
 
+# ---------------- DLQ SPLIT ----------------
+dlq_stream = telemetry_stream.filter(lambda x: "_error" in x)
+valid_stream = telemetry_stream.filter(lambda x: "_error" not in x)
+
+# send bad data to DLQ topic
+dlq_stream.map(lambda x: json.dumps(x)).add_sink(create_producer("dlq_topic"))
 
 # ---------------- JOIN ----------------
 class WeatherJoin(CoMapFunction):
-
     def __init__(self):
         self.latest_weather = None
 
     def map1(self, telemetry):
-        # only telemetry continues forward
         if self.latest_weather:
             telemetry["temperature"] = self.latest_weather.get("temperature")
             telemetry["rain_intensity"] = self.latest_weather.get("rain_intensity")
         return telemetry
 
     def map2(self, weather):
-        # store weather but DO NOT emit it
-        self.latest_weather = weather
+        if "_error" not in weather:
+            self.latest_weather = weather
         return None
 
-
-joined_stream = telemetry_stream.connect(weather_stream).map(WeatherJoin()) \
-    .filter(lambda x: x is not None and "driver_id" in x)
-
+joined = valid_stream.connect(weather_stream).map(WeatherJoin()) \
+    .filter(lambda x: x is not None)
 
 # ---------------- ROLLING AVG ----------------
 class AvgSpeed(MapFunction):
-
     def __init__(self):
         self.stats = {}
 
-    def map(self, value):
-        if "driver_id" not in value:
-            return None
+    def map(self, v):
+        d = v["driver_id"]
+        if d not in self.stats:
+            self.stats[d] = {"sum": 0, "count": 0}
 
-        driver = value["driver_id"]
-        speed = value["speed"]
+        self.stats[d]["sum"] += v["speed"]
+        self.stats[d]["count"] += 1
 
-        if driver not in self.stats:
-            self.stats[driver] = {"total": 0, "count": 0}
+        v["rolling_avg_speed"] = self.stats[d]["sum"] / self.stats[d]["count"]
+        return v
 
-        self.stats[driver]["total"] += speed
-        self.stats[driver]["count"] += 1
+# ---------------- ML ----------------
+class ML(MapFunction):
+    def map(self, v):
+        import numpy as np
 
-        value["rolling_avg_speed"] = (
-            self.stats[driver]["total"] /
-            self.stats[driver]["count"]
-        )
+        features = np.array([
+            v["speed"], 13000,
+            v["temperature"], v["rain_intensity"]
+        ]).reshape(1, -1)
 
-        return value
+        v["anomaly_score"] = float(iso.decision_function(features)[0])
+        v["tire_health"] = float(xgb.predict(features)[0])
+        return v
 
+# ---------------- ALERT ----------------
+class Alert(MapFunction):
+    def map(self, v):
+        if v["anomaly_score"] < -0.05:
+            return json.dumps(v)
+        return None
 
-result_stream = joined_stream.map(AvgSpeed()) \
-    .filter(lambda x: x is not None)
+# ---------------- PIPELINE ----------------
+stream = joined.map(AvgSpeed()).map(ML())
 
+alerts = stream.map(Alert()).filter(lambda x: x is not None)
+alerts.add_sink(create_producer("alerts_topic"))
 
-# ---------------- WINDOW ----------------
-class WindowAvg(ProcessWindowFunction):
-
-    def process(self, key, context, elements):
-        elements = list(elements)
-
-        total = sum(e["speed"] for e in elements)
-        count = len(elements)
-
-        avg = total / count if count > 0 else 0
-
-        for e in elements:
-            e["window_avg_speed"] = avg
-            yield e
-
-
-windowed_stream = result_stream \
-    .key_by(lambda x: x["driver_id"]) \
-    .window(TumblingProcessingTimeWindows.of(Time.seconds(5))) \
-    .process(WindowAvg())
-
-
-# ---------------- POSTGRES ----------------
-class PostgresWriter(MapFunction):
-
-    def open(self, runtime_context):
+# ---------------- DB ----------------
+class DB(MapFunction):
+    def open(self, ctx):
         self.conn = psycopg2.connect(
             host="postgres",
             database="telemetry",
             user="admin",
             password="admin"
         )
-        self.cursor = self.conn.cursor()
-        print("✅ Connected to Postgres")
+        self.cur = self.conn.cursor()
 
-    def map(self, value):
+    def map(self, v):
         try:
-            self.cursor.execute(
-                """
-                INSERT INTO telemetry_processed
-                (driver_id, speed, temperature, rain_intensity,
-                 rolling_avg_speed, lap, event_time)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)
-                """,
-                (
-                    value.get("driver_id"),
-                    value.get("speed"),
-                    value.get("temperature"),
-                    value.get("rain_intensity"),
-                    value.get("rolling_avg_speed"),
-                    0,
-                    int(time.time() * 1000)
-                )
-            )
+            self.cur.execute("""
+            INSERT INTO telemetry_processed
+            (driver_id, speed, temperature, rain_intensity,
+             rolling_avg_speed, lap, event_time,
+             anomaly_score, tire_health, lat, lon)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (
+                v["driver_id"], v["speed"], v["temperature"],
+                v["rain_intensity"], v["rolling_avg_speed"],
+                0, int(time.time() * 1000),
+                v["anomaly_score"], v["tire_health"],
+                v.get("lat"), v.get("lon")
+            ))
             self.conn.commit()
-
         except Exception as e:
-            print("❌ Insert error:", e)
+            print("DB error:", e)
 
-        return value
+        return v
 
+stream.map(DB()).print()
 
-# ---------------- EXECUTE ----------------
-windowed_stream.map(PostgresWriter()).print()
-
-env.execute("FINAL FIXED Pipeline")
+env.execute("FINAL PIPELINE WITH DLQ")

@@ -6,7 +6,15 @@ CREATE TABLE telemetry_processed (
     rain_intensity FLOAT,
     rolling_avg_speed FLOAT,
     lap INTEGER,
-    event_time BIGINT
+    event_time BIGINT,
+
+    -- 🔥 NEW ML FIELDS
+    anomaly_score FLOAT,
+    tire_health FLOAT,
+
+    -- 🔥 NEW GEO
+    lat FLOAT,
+    lon FLOAT
 );
 
 CREATE INDEX idx_driver ON telemetry_processed(driver_id);
