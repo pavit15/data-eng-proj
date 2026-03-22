@@ -7,13 +7,13 @@ services:
     container_name: jobmanager
     ports:
       - "8081:8081"
-      - "9249:9249"   # 🔥 Prometheus metrics
+      - "9249:9249"
     command: jobmanager
     environment:
-      - JOB_MANAGER_RPC_ADDRESS=jobmanager
-      - FLINK_PROPERTIES=metrics.reporter.prom.class=org.apache.flink.metrics.prometheus.PrometheusReporter;metrics.reporter.prom.port=9249
+      JOB_MANAGER_RPC_ADDRESS: jobmanager
     volumes:
       - .:/opt/flink/usrlib
+      - ./flink-conf.yaml:/opt/flink/conf/flink-conf.yaml
 
   taskmanager:
     build: .
@@ -22,9 +22,10 @@ services:
     depends_on:
       - jobmanager
     environment:
-      - JOB_MANAGER_RPC_ADDRESS=jobmanager
-      - taskmanager.numberOfTaskSlots=4
-      - FLINK_PROPERTIES=metrics.reporter.prom.class=org.apache.flink.metrics.prometheus.PrometheusReporter;metrics.reporter.prom.port=9249
+      JOB_MANAGER_RPC_ADDRESS: jobmanager
+      taskmanager.numberOfTaskSlots: "4"
+    volumes:
+      - ./flink-conf.yaml:/opt/flink/conf/flink-conf.yaml
 
   postgres:
     image: postgres:15
@@ -62,7 +63,6 @@ services:
       - postgres
     command: streamlit run dashboard.py
 
-  # 🔥 NEW SERVICE: PROMETHEUS
   prometheus:
     image: prom/prometheus
     container_name: prometheus

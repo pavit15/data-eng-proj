@@ -40,4 +40,9 @@ RUN wget https://repo1.maven.org/maven2/org/apache/kafka/kafka-clients/3.5.1/kaf
 RUN wget https://repo1.maven.org/maven2/org/apache/flink/flink-connector-kafka/1.17.2/flink-connector-kafka-1.17.2.jar \
     -P /opt/flink/lib/
 
+    # 🔥 Enable Prometheus metrics
+RUN echo "metrics.reporter.prom.class: org.apache.flink.metrics.prometheus.PrometheusReporter" >> /opt/flink/conf/flink-conf.yaml && \
+    echo "metrics.reporter.prom.port: 9249" >> /opt/flink/conf/flink-conf.yaml && \
+    echo "metrics.reporter.prom.host: 0.0.0.0" >> /opt/flink/conf/flink-conf.yaml
+    
 USER flink

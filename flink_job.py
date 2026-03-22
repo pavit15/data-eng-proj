@@ -8,10 +8,17 @@ from pyflink.datastream import StreamExecutionEnvironment
 from pyflink.common.serialization import SimpleStringSchema
 from pyflink.datastream.connectors.kafka import FlinkKafkaConsumer, FlinkKafkaProducer
 from pyflink.datastream.functions import MapFunction, CoMapFunction
+from pyflink.common.restart_strategy import RestartStrategies
 
 # ---------------- ENV ----------------
 env = StreamExecutionEnvironment.get_execution_environment()
-env.enable_checkpointing(5000)
+
+# ✅ safer checkpointing
+env.enable_checkpointing(15000)
+
+# 🔥 DEBUG MODE (disable restart to see real errors)
+env.set_restart_strategy(RestartStrategies.no_restart())
+
 env.set_parallelism(1)
 
 # ---------------- ML SETUP ----------------
@@ -31,7 +38,7 @@ def create_consumer(topic):
     props = {
         "bootstrap.servers": "kafka:29092",
         "group.id": "flink_group_final",
-        "auto.offset.reset": "latest"
+        "auto.offset.reset": "earliest"   # ✅ FIXED
     }
     return FlinkKafkaConsumer(topic, SimpleStringSchema(), props)
 
@@ -42,13 +49,12 @@ def create_producer(topic):
         producer_config={"bootstrap.servers": "kafka:29092"}
     )
 
-# ---------------- SAFE PARSE (DLQ READY) ----------------
+# ---------------- SAFE PARSE ----------------
 class SafeParse(MapFunction):
     def map(self, x):
         try:
             data = json.loads(x)
 
-            # basic validation
             if "driver_id" not in data or "speed" not in data:
                 return {"_error": True, "raw": x}
 
@@ -64,11 +70,10 @@ weather_raw = env.add_source(create_consumer("weather_stream"))
 telemetry_stream = telemetry_raw.map(SafeParse())
 weather_stream = weather_raw.map(SafeParse())
 
-# ---------------- DLQ SPLIT ----------------
+# ---------------- DLQ ----------------
 dlq_stream = telemetry_stream.filter(lambda x: "_error" in x)
 valid_stream = telemetry_stream.filter(lambda x: "_error" not in x)
 
-# send bad data to DLQ topic
 dlq_stream.map(lambda x: json.dumps(x)).add_sink(create_producer("dlq_topic"))
 
 # ---------------- JOIN ----------------
@@ -77,9 +82,15 @@ class WeatherJoin(CoMapFunction):
         self.latest_weather = None
 
     def map1(self, telemetry):
+
+        # ✅ SAFE DEFAULTS
         if self.latest_weather:
-            telemetry["temperature"] = self.latest_weather.get("temperature")
-            telemetry["rain_intensity"] = self.latest_weather.get("rain_intensity")
+            telemetry["temperature"] = self.latest_weather.get("temperature", 25.0)
+            telemetry["rain_intensity"] = self.latest_weather.get("rain_intensity", 0.0)
+        else:
+            telemetry["temperature"] = 25.0
+            telemetry["rain_intensity"] = 0.0
+
         return telemetry
 
     def map2(self, weather):
@@ -97,6 +108,7 @@ class AvgSpeed(MapFunction):
 
     def map(self, v):
         d = v["driver_id"]
+
         if d not in self.stats:
             self.stats[d] = {"sum": 0, "count": 0}
 
@@ -111,13 +123,21 @@ class ML(MapFunction):
     def map(self, v):
         import numpy as np
 
+        # ✅ SAFE FEATURE HANDLING
+        speed = v.get("speed", 300)
+        temperature = v.get("temperature", 25.0)
+        rain = v.get("rain_intensity", 0.0)
+
         features = np.array([
-            v["speed"], 13000,
-            v["temperature"], v["rain_intensity"]
+            speed,
+            13000,
+            temperature,
+            rain
         ]).reshape(1, -1)
 
         v["anomaly_score"] = float(iso.decision_function(features)[0])
         v["tire_health"] = float(xgb.predict(features)[0])
+
         return v
 
 # ---------------- ALERT ----------------
@@ -142,6 +162,9 @@ class DB(MapFunction):
             user="admin",
             password="admin"
         )
+
+        # ✅ FIX: avoid commit blocking
+        self.conn.autocommit = True
         self.cur = self.conn.cursor()
 
     def map(self, v):
@@ -153,15 +176,22 @@ class DB(MapFunction):
              anomaly_score, tire_health, lat, lon)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (
-                v["driver_id"], v["speed"], v["temperature"],
-                v["rain_intensity"], v["rolling_avg_speed"],
-                0, int(time.time() * 1000),
-                v["anomaly_score"], v["tire_health"],
-                v.get("lat"), v.get("lon")
+                v["driver_id"],
+                v["speed"],
+                v["temperature"],
+                v["rain_intensity"],
+                v["rolling_avg_speed"],
+                0,
+                int(time.time() * 1000),
+                v["anomaly_score"],
+                v["tire_health"],
+                v.get("lat"),
+                v.get("lon")
             ))
-            self.conn.commit()
+
         except Exception as e:
-            print("DB error:", e)
+            print("🔥 DB ERROR:", e)
+            raise e   # ✅ CRITICAL FIX
 
         return v
 
