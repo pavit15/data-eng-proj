@@ -174,3 +174,7 @@ SELECT * FROM telemetry_processed LIMIT 10;
 ```
 ## Day 11
 Grafana + promethues integrated into final proj
+
+# Day 15
+
+Worked with promethues, faced several issues on integration with flink due to version issues. 
