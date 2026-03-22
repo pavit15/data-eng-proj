@@ -125,15 +125,19 @@ docker exec -it postgres psql -U admin -d telemetry
 
 Create new table 
 ```
-CREATE TABLE telemetry_processed (
+CREATE TABLE IF NOT EXISTS telemetry_processed (
     id SERIAL PRIMARY KEY,
-    driver_id TEXT,
+    driver_id VARCHAR(50),
     speed FLOAT,
     temperature FLOAT,
     rain_intensity FLOAT,
     rolling_avg_speed FLOAT,
     lap INT,
-    event_time BIGINT
+    event_time BIGINT,
+    anomaly_score FLOAT,
+    tire_health FLOAT,
+    lat FLOAT,
+    lon FLOAT
 );
 ```
 
@@ -174,3 +178,7 @@ SELECT * FROM telemetry_processed LIMIT 10;
 ```
 ## Day 11
 Grafana + promethues integrated into final proj
+
+# Day 15
+
+Worked with promethues, faced several issues on integration with flink due to version issues. 
