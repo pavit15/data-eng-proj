@@ -186,3 +186,20 @@ Worked with promethues, faced several issues on integration with flink due to ve
 
 ## Day 17
 Integration of grafana
+
+# Day 
+Promtheus
+```
+http://localhost:9090
+```
+
+Status>Target Health
+Flink>UP
+
+Grafana
+```
+http://localhost:3000
+```
+
+user: admin
+pass: admin
